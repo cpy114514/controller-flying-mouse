@@ -316,6 +316,7 @@ class App:
         self.loading_text = tk.StringVar(value="")
 
         self.build_ui()
+        self.root.after(200, self.connect)
         self.root.after(50, self.poll)
 
     def build_ui(self):
