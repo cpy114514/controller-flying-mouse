@@ -384,20 +384,21 @@ class JoyCon:
         if not self.device:
             return None
 
+        latest_report = None
         try:
             for _ in range(8):
                 data = self.device.read(64)
                 if not data:
                     break
                 if data[0] == 0x30 and len(data) >= 49:
-                    report = self.parse_report(data)
-                    self.last_report = report
-                    return report
+                    latest_report = self.parse_report(data)
         except OSError:
             self.close()
             return None
 
-        return self.last_report
+        if latest_report:
+            self.last_report = latest_report
+        return latest_report
 
     def parse_report(self, data):
         buttons_right = data[3]
@@ -472,6 +473,7 @@ class App:
         self.bias_samples = []
         self.stationary_score = 0.0
         self.last_accel_raw = None
+        self.pointer_zero_locked = False
         self.motion_energy = 0.0
         self.filtered_yaw = 0.0
         self.filtered_roll = 0.0
@@ -844,6 +846,11 @@ class App:
         roll -= self.drift_roll
         yaw, roll = self.apply_residual_filter(yaw, roll)
 
+        if self.pointer_zero_locked or (yaw == 0.0 and roll == 0.0):
+            self.mouse_remainder_x = 0.0
+            self.mouse_remainder_y = 0.0
+            return
+
         dx_float = yaw * self.sensitivity.get() + self.mouse_remainder_x
         dy_value = -roll if self.invert_y.get() else roll
         dy_float = dy_value * self.sensitivity.get() + self.mouse_remainder_y
@@ -872,13 +879,9 @@ class App:
         quiet_threshold = max(0.15, self.deadzone.get())
         moving_threshold = quiet_threshold * 3.0
         if magnitude < quiet_threshold:
-            self.filtered_yaw *= 0.72
-            self.filtered_roll *= 0.72
-            if abs(self.filtered_yaw) < 0.03:
-                self.filtered_yaw = 0.0
-            if abs(self.filtered_roll) < 0.03:
-                self.filtered_roll = 0.0
-            return self.filtered_yaw, self.filtered_roll
+            self.filtered_yaw = 0.0
+            self.filtered_roll = 0.0
+            return 0.0, 0.0
 
         response = 0.84 if self.motion_energy > moving_threshold else 0.68
         self.filtered_yaw = self.filtered_yaw * (1.0 - response) + yaw * response
@@ -890,6 +893,7 @@ class App:
             self.bias_samples.clear()
             self.stationary_score = 0.0
             self.last_accel_raw = accel
+            self.pointer_zero_locked = False
             return
 
         accel_delta = 0.0
@@ -913,6 +917,13 @@ class App:
             self.stationary_score = max(0.0, self.stationary_score - 0.18)
             if not self.bias_ready:
                 self.bias_samples.clear()
+
+        zero_lock_limit = max(0.75, self.deadzone.get() * 1.5)
+        self.pointer_zero_locked = (
+            self.bias_ready
+            and self.stationary_score >= 0.35
+            and corrected_magnitude < zero_lock_limit
+        )
 
         if self.stationary_score < 0.85:
             return
@@ -1098,6 +1109,7 @@ class App:
         self.filtered_roll = 0.0
         self.stationary_score = 0.0
         self.last_accel_raw = None
+        self.pointer_zero_locked = False
 
     def begin_manual_calibration(self):
         if not self.joycon.device:
@@ -1149,6 +1161,7 @@ class App:
         self.bias_samples.clear()
         self.stationary_score = 0.0
         self.last_accel_raw = None
+        self.pointer_zero_locked = False
 
     @staticmethod
     def median(values):
