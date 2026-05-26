@@ -85,8 +85,6 @@ for index in range(1, 13):
     VK_KEY_NAMES[f"F{index}"] = 0x6F + index
 
 GYRO_SCALE_DEG_PER_SEC = 936.0 / 32767.0
-LARGE_CURSOR_SIZE = 64
-SPI_SETCURSORS = 0x0057
 MANUAL_CALIBRATION_SAMPLE_COUNT = 60
 STARTUP_REGISTRY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -206,34 +204,6 @@ def center_mouse():
     screen_width = user32.GetSystemMetrics(0)
     screen_height = user32.GetSystemMetrics(1)
     user32.SetCursorPos(screen_width // 2, screen_height // 2)
-
-
-def load_system_cursors():
-    user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, 0)
-
-
-def get_cursor_size():
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Cursors") as key:
-            value, _ = winreg.QueryValueEx(key, "CursorBaseSize")
-            return int(value)
-    except OSError:
-        return None
-
-
-def set_cursor_size(size):
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Cursors", 0, winreg.KEY_SET_VALUE) as key:
-        winreg.SetValueEx(key, "CursorBaseSize", 0, winreg.REG_DWORD, int(size))
-    load_system_cursors()
-
-
-def delete_cursor_size_value():
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Cursors", 0, winreg.KEY_SET_VALUE) as key:
-            winreg.DeleteValue(key, "CursorBaseSize")
-    except OSError:
-        pass
-    load_system_cursors()
 
 
 def startup_command():
@@ -459,8 +429,6 @@ class App:
         self.tray_available = False
         self.control_server = None
         self.quitting = False
-        self.cursor_original_size = None
-        self.cursor_size_changed = False
         self.last_buttons = (0, 0, 0)
         self.last_scroll_time = time.perf_counter()
         self.last_hscroll_time = time.perf_counter()
@@ -713,40 +681,13 @@ class App:
         self.status_text.set("Running")
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
-        self.make_cursor_large()
 
     def stop(self):
         self.running = False
         self.release_mouse_buttons()
-        self.restore_cursor_size()
         self.status_text.set("Stopped")
         self.start_button.configure(state="disabled" if self.calibration_required else "normal")
         self.stop_button.configure(state="disabled")
-
-    def make_cursor_large(self):
-        if self.cursor_size_changed:
-            return
-
-        self.cursor_original_size = get_cursor_size()
-        try:
-            set_cursor_size(LARGE_CURSOR_SIZE)
-            self.cursor_size_changed = True
-        except OSError:
-            self.status_text.set("Running. Could not change cursor size.")
-
-    def restore_cursor_size(self):
-        if not self.cursor_size_changed:
-            return
-
-        try:
-            if self.cursor_original_size is None:
-                delete_cursor_size_value()
-            else:
-                set_cursor_size(self.cursor_original_size)
-        except OSError:
-            pass
-
-        self.cursor_size_changed = False
 
     def reset_mouse(self):
         center_mouse()
@@ -1214,7 +1155,6 @@ class App:
     def quit_app(self):
         self.quitting = True
         self.stop()
-        self.restore_cursor_size()
         self.joycon.close()
         if self.tray_icon:
             self.tray_icon.stop()
