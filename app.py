@@ -473,7 +473,6 @@ class App:
         self.bias_samples = []
         self.stationary_score = 0.0
         self.last_accel_raw = None
-        self.pointer_zero_locked = False
         self.motion_energy = 0.0
         self.filtered_yaw = 0.0
         self.filtered_roll = 0.0
@@ -846,7 +845,7 @@ class App:
         roll -= self.drift_roll
         yaw, roll = self.apply_residual_filter(yaw, roll)
 
-        if self.pointer_zero_locked or (yaw == 0.0 and roll == 0.0):
+        if yaw == 0.0 and roll == 0.0:
             self.mouse_remainder_x = 0.0
             self.mouse_remainder_y = 0.0
             return
@@ -883,7 +882,11 @@ class App:
             self.filtered_roll = 0.0
             return 0.0, 0.0
 
-        response = 0.84 if self.motion_energy > moving_threshold else 0.68
+        scale = (magnitude - quiet_threshold) / magnitude
+        yaw *= scale
+        roll *= scale
+
+        response = 0.92 if self.motion_energy > moving_threshold else 0.76
         self.filtered_yaw = self.filtered_yaw * (1.0 - response) + yaw * response
         self.filtered_roll = self.filtered_roll * (1.0 - response) + roll * response
         return self.filtered_yaw, self.filtered_roll
@@ -893,7 +896,6 @@ class App:
             self.bias_samples.clear()
             self.stationary_score = 0.0
             self.last_accel_raw = accel
-            self.pointer_zero_locked = False
             return
 
         accel_delta = 0.0
@@ -906,7 +908,7 @@ class App:
         corrected_magnitude = math.hypot(corrected_yaw, corrected_roll)
 
         if self.bias_ready:
-            gyro_limit = max(0.65, self.deadzone.get() * 1.25)
+            gyro_limit = max(1.25, self.deadzone.get() * 2.5)
             stationary = corrected_magnitude < gyro_limit and accel_delta < 350.0
         else:
             stationary = math.hypot(yaw, roll) < 1.8 and accel_delta < 350.0
@@ -918,14 +920,9 @@ class App:
             if not self.bias_ready:
                 self.bias_samples.clear()
 
-        zero_lock_limit = max(0.75, self.deadzone.get() * 1.5)
-        self.pointer_zero_locked = (
-            self.bias_ready
-            and self.stationary_score >= 0.35
-            and corrected_magnitude < zero_lock_limit
-        )
-
         if self.stationary_score < 0.85:
+            if self.bias_ready and self.stationary_score >= 0.25:
+                self.apply_realtime_bias_correction(corrected_yaw, corrected_roll, corrected_magnitude)
             return
 
         if not self.bias_ready:
@@ -942,9 +939,13 @@ class App:
             self.runtime_text.set("Runtime: mouse stabilized")
             return
 
-        correction_rate = 0.01
-        self.drift_yaw = self.drift_yaw * (1.0 - correction_rate) + yaw * correction_rate
-        self.drift_roll = self.drift_roll * (1.0 - correction_rate) + roll * correction_rate
+        self.apply_realtime_bias_correction(corrected_yaw, corrected_roll, corrected_magnitude)
+
+    def apply_realtime_bias_correction(self, corrected_yaw, corrected_roll, corrected_magnitude):
+        micro_limit = max(0.45, self.deadzone.get() * 0.9)
+        correction_rate = 0.16 if corrected_magnitude < micro_limit else 0.045
+        self.drift_yaw += corrected_yaw * correction_rate
+        self.drift_roll += corrected_roll * correction_rate
 
     def build_debounced_buttons(self, right_buttons, shared_buttons, left_buttons):
         raw = {
@@ -1109,7 +1110,6 @@ class App:
         self.filtered_roll = 0.0
         self.stationary_score = 0.0
         self.last_accel_raw = None
-        self.pointer_zero_locked = False
 
     def begin_manual_calibration(self):
         if not self.joycon.device:
@@ -1161,7 +1161,6 @@ class App:
         self.bias_samples.clear()
         self.stationary_score = 0.0
         self.last_accel_raw = None
-        self.pointer_zero_locked = False
 
     @staticmethod
     def median(values):
