@@ -22,6 +22,8 @@ When the app starts, it registers itself in the current Windows user's startup a
 
 Only one instance can run at a time. If the app is already running and you launch it again, the existing window is shown instead of starting another copy.
 
+The app learns gyro drift automatically. It starts quickly and keeps refining drift only during low-motion moments, so a shaky connection should not permanently bias the pointer.
+
 The app is designed for one controller. There is no add-controller step:
 
 1. Put the controller in Switch mode.

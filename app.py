@@ -87,7 +87,6 @@ for index in range(1, 13):
 GYRO_SCALE_DEG_PER_SEC = 936.0 / 32767.0
 LARGE_CURSOR_SIZE = 64
 SPI_SETCURSORS = 0x0057
-CALIBRATION_SAMPLE_COUNT = 60
 STARTUP_REGISTRY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
@@ -468,10 +467,13 @@ class App:
         self.mouse_remainder_y = 0.0
         self.drift_yaw = 0.0
         self.drift_roll = 0.0
+        self.bias_ready = False
+        self.bias_samples = []
+        self.stationary_score = 0.0
+        self.last_accel_raw = None
         self.motion_energy = 0.0
         self.filtered_yaw = 0.0
         self.filtered_roll = 0.0
-        self.calibration_samples = []
         self.calibrating = False
         self.settings = load_settings()
         self.loading_settings = True
@@ -645,7 +647,10 @@ class App:
 
         if self.joycon.connect_first():
             self.controller_text.set(f"Connected: {self.joycon.name} ({self.joycon.side})")
-            self.begin_drift_calibration()
+            self.reset_bias_estimator()
+            self.reset_air_mouse_state()
+            self.loading_text.set("")
+            self.status_text.set("Stopped")
         else:
             self.controller_text.set("No Joy-Con / Switch controller found. Pair it in Switch mode, then press Connect.")
 
@@ -758,12 +763,13 @@ class App:
         gyro_x, gyro_y, gyro_z = report["gyro_dps"]
         left_x, left_y = report["left_stick"]
         right_x, right_y = report["right_stick"]
+        accel = report["accel_raw"]
         stick_x, stick_y = self.active_stick(left_x, left_y, right_x, right_y)
         yaw, roll = self.map_gyro(gyro_x, gyro_y, gyro_z)
 
         self.handle_start_toggle(debounced)
         self.handle_mouse_reset(debounced)
-        self.update_drift_calibration(yaw, roll)
+        self.update_bias_estimator(yaw, roll, accel)
 
         corrected_yaw = yaw - self.drift_yaw
         corrected_roll = roll - self.drift_roll
@@ -771,7 +777,7 @@ class App:
 
         self.gyro_text.set(
             f"gyro x {gyro_x:+.1f}  y {gyro_y:+.1f}  z {gyro_z:+.1f} deg/s"
-            f"    drift yaw {self.drift_yaw:+.2f} roll {self.drift_roll:+.2f}"
+            f"    bias yaw {self.drift_yaw:+.2f} roll {self.drift_roll:+.2f}"
         )
         self.mouse_gyro_text.set(f"mouse yaw {filtered_yaw:+.2f}  roll {filtered_roll:+.2f}")
         self.stick_text.set(f"LX {left_x:+.3f}  LY {left_y:+.3f}    RX {right_x:+.3f}  RY {right_y:+.3f}")
@@ -854,7 +860,7 @@ class App:
 
         quiet_threshold = max(0.15, self.deadzone.get())
         moving_threshold = quiet_threshold * 3.0
-        if self.motion_energy < moving_threshold and magnitude < quiet_threshold * 1.8:
+        if magnitude < quiet_threshold:
             self.filtered_yaw *= 0.72
             self.filtered_roll *= 0.72
             if abs(self.filtered_yaw) < 0.03:
@@ -863,10 +869,60 @@ class App:
                 self.filtered_roll = 0.0
             return self.filtered_yaw, self.filtered_roll
 
-        response = 0.78 if self.motion_energy > moving_threshold else 0.45
+        response = 0.84 if self.motion_energy > moving_threshold else 0.68
         self.filtered_yaw = self.filtered_yaw * (1.0 - response) + yaw * response
         self.filtered_roll = self.filtered_roll * (1.0 - response) + roll * response
         return self.filtered_yaw, self.filtered_roll
+
+    def update_bias_estimator(self, yaw, roll, accel):
+        if not self.smart_stabilization.get():
+            self.bias_samples.clear()
+            self.stationary_score = 0.0
+            self.last_accel_raw = accel
+            return
+
+        accel_delta = 0.0
+        if self.last_accel_raw is not None:
+            accel_delta = math.sqrt(sum((accel[index] - self.last_accel_raw[index]) ** 2 for index in range(3)))
+        self.last_accel_raw = accel
+
+        corrected_yaw = yaw - self.drift_yaw
+        corrected_roll = roll - self.drift_roll
+        corrected_magnitude = math.hypot(corrected_yaw, corrected_roll)
+
+        if self.bias_ready:
+            gyro_limit = max(0.65, self.deadzone.get() * 1.25)
+            stationary = corrected_magnitude < gyro_limit and accel_delta < 350.0
+        else:
+            stationary = math.hypot(yaw, roll) < 1.8 and accel_delta < 350.0
+
+        if stationary:
+            self.stationary_score = min(1.0, self.stationary_score + 0.08)
+        else:
+            self.stationary_score = max(0.0, self.stationary_score - 0.18)
+            if not self.bias_ready:
+                self.bias_samples.clear()
+
+        if self.stationary_score < 0.85:
+            return
+
+        if not self.bias_ready:
+            self.bias_samples.append((yaw, roll))
+            if len(self.bias_samples) < 45:
+                self.runtime_text.set("Runtime: learning gyro zero")
+                return
+
+            self.drift_yaw = self.median(sample[0] for sample in self.bias_samples)
+            self.drift_roll = self.median(sample[1] for sample in self.bias_samples)
+            self.bias_samples.clear()
+            self.bias_ready = True
+            self.reset_air_mouse_state()
+            self.runtime_text.set("Runtime: gyro zero learned")
+            return
+
+        correction_rate = 0.01
+        self.drift_yaw = self.drift_yaw * (1.0 - correction_rate) + yaw * correction_rate
+        self.drift_roll = self.drift_roll * (1.0 - correction_rate) + roll * correction_rate
 
     def build_debounced_buttons(self, right_buttons, shared_buttons, left_buttons):
         raw = {
@@ -1029,49 +1085,26 @@ class App:
         self.motion_energy = 0.0
         self.filtered_yaw = 0.0
         self.filtered_roll = 0.0
+        self.stationary_score = 0.0
+        self.last_accel_raw = None
 
-    def begin_drift_calibration(self):
-        self.reset_air_mouse_state()
-        self.calibration_samples = []
-        self.calibrating = True
-        self.status_text.set("Calibrating drift. Hold the Joy-Con still.")
-        self.update_loading_animation()
-
-    def update_drift_calibration(self, yaw, roll):
-        if not self.calibrating:
-            return
-
-        self.calibration_samples.append((yaw, roll))
-        if len(self.calibration_samples) < CALIBRATION_SAMPLE_COUNT:
-            self.update_loading_animation()
-            return
-
-        yaw_values = [sample[0] for sample in self.calibration_samples]
-        roll_values = [sample[1] for sample in self.calibration_samples]
-        self.drift_yaw = self.trimmed_mean(yaw_values)
-        self.drift_roll = self.trimmed_mean(roll_values)
-        self.calibrating = False
-        self.loading_text.set("")
-        self.reset_button.configure(text="Reset Mouse")
-        self.status_text.set("Running" if self.running else "Stopped")
-
-    def update_loading_animation(self):
-        if not self.calibrating:
-            return
-
-        progress = min(1.0, len(self.calibration_samples) / CALIBRATION_SAMPLE_COUNT)
-        filled = int(progress * 12)
-        bar = "#" * filled + "-" * (12 - filled)
-        dots = "." * ((len(self.calibration_samples) // 6) % 4)
-        self.loading_text.set(f"Calibrating drift [{bar}] {int(progress * 100):3d}%{dots}")
-        self.reset_button.configure(text="Calibrating...")
+    def reset_bias_estimator(self):
+        self.drift_yaw = 0.0
+        self.drift_roll = 0.0
+        self.bias_ready = False
+        self.bias_samples.clear()
+        self.stationary_score = 0.0
+        self.last_accel_raw = None
 
     @staticmethod
-    def trimmed_mean(values):
-        ordered = sorted(values)
-        trim = max(1, len(ordered) // 5)
-        middle = ordered[trim:-trim] if len(ordered) > trim * 2 else ordered
-        return sum(middle) / len(middle)
+    def median(values):
+        sorted_values = sorted(values)
+        if not sorted_values:
+            return 0.0
+        middle = len(sorted_values) // 2
+        if len(sorted_values) % 2:
+            return sorted_values[middle]
+        return (sorted_values[middle - 1] + sorted_values[middle]) / 2.0
 
     @staticmethod
     def describe_buttons(right_buttons, shared_buttons, left_buttons):
