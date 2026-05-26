@@ -658,11 +658,12 @@ class App:
             self.calibrating = False
             self.calibration_required = True
             self.calibration_samples.clear()
-            self.loading_text.set("Calibration required - hold still and click Calibrate Gyro")
+            self.loading_text.set("Auto calibration starting - hold the Joy-Con still")
             self.calibrate_button.configure(text="Calibrate Gyro", state="normal")
             self.start_button.configure(state="disabled")
             self.stop_button.configure(state="disabled")
-            self.status_text.set("Calibration required before Start.")
+            self.status_text.set("Connected. Calibrating gyro.")
+            self.begin_manual_calibration()
         else:
             self.controller_text.set("No Joy-Con / Switch controller found. Pair it in Switch mode, then press Connect.")
 
