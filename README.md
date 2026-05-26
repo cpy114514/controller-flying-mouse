@@ -22,7 +22,7 @@ When the app starts, it registers itself in the current Windows user's startup a
 
 Only one instance can run at a time. If the app is already running and you launch it again, the existing window is shown instead of starting another copy.
 
-The app learns gyro drift automatically. It starts quickly and keeps refining drift only during low-motion moments, so a shaky connection should not permanently bias the pointer.
+The app requires manual gyro calibration after each connection. Hold the Joy-Con still, click `Calibrate Gyro`, wait for the progress message to finish, then click Start.
 
 The app is designed for one controller. There is no add-controller step:
 
@@ -30,7 +30,8 @@ The app is designed for one controller. There is no add-controller step:
 2. Pair/connect it in Windows Bluetooth or USB.
 3. Open the app.
 4. Click Connect.
-5. Click Start, or press the controller + button.
+5. Click Calibrate Gyro while holding the controller still.
+6. Click Start, or press the controller + button.
 
 This app assumes you hold one Joy-Con vertically, like a small remote.
 
