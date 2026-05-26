@@ -2,12 +2,23 @@
 setlocal
 cd /d "%~dp0"
 
-if not exist ".deps\python\hid" (
+if not exist ".deps\python\hid*.pyd" (
     echo Installing local Python dependency: hidapi
     py -3 -m pip install --upgrade --target ".deps\python" hidapi
     if errorlevel 1 (
         echo.
         echo Failed to install hidapi.
+        pause
+        exit /b 1
+    )
+)
+
+if not exist ".deps\python\pystray" (
+    echo Installing local Python dependency: pystray
+    py -3 -m pip install --upgrade --target ".deps\python" pystray
+    if errorlevel 1 (
+        echo.
+        echo Failed to install pystray.
         pause
         exit /b 1
     )

@@ -1,8 +1,13 @@
 import ctypes
+import json
 import math
+import socket
+import sys
+import threading
 import time
 import tkinter as tk
 import winreg
+from pathlib import Path
 from tkinter import ttk
 
 try:
@@ -10,7 +15,20 @@ try:
 except ImportError:
     hid = None
 
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+except ImportError:
+    pystray = None
+    Image = None
+    ImageDraw = None
 
+
+APP_NAME = "JoyConGyroAirMouse"
+SINGLE_INSTANCE_MUTEX = "Local\\JoyConGyroAirMouseSingleInstance"
+CONTROL_HOST = "127.0.0.1"
+CONTROL_PORT = 47631
+SETTINGS_PATH = Path.home() / "AppData" / "Roaming" / APP_NAME / "settings.json"
 NINTENDO_VENDOR_ID = 0x057E
 SWITCH_PRODUCT_IDS = {
     0x2006: "Joy-Con Left",
@@ -19,19 +37,58 @@ SWITCH_PRODUCT_IDS = {
 }
 
 INPUT_MOUSE = 0
+INPUT_KEYBOARD = 1
 MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010
+MOUSEEVENTF_MIDDLEDOWN = 0x0020
+MOUSEEVENTF_MIDDLEUP = 0x0040
 MOUSEEVENTF_WHEEL = 0x0800
 MOUSEEVENTF_HWHEEL = 0x01000
 WHEEL_DELTA = 120
+KEYEVENTF_KEYUP = 0x0002
+VK_LEFT = 0x25
+VK_RIGHT = 0x27
+VK_KEY_NAMES = {
+    "BACKSPACE": 0x08,
+    "TAB": 0x09,
+    "ENTER": 0x0D,
+    "RETURN": 0x0D,
+    "SHIFT": 0x10,
+    "CTRL": 0x11,
+    "CONTROL": 0x11,
+    "ALT": 0x12,
+    "PAUSE": 0x13,
+    "CAPSLOCK": 0x14,
+    "ESC": 0x1B,
+    "ESCAPE": 0x1B,
+    "SPACE": 0x20,
+    "PAGEUP": 0x21,
+    "PAGEDOWN": 0x22,
+    "END": 0x23,
+    "HOME": 0x24,
+    "LEFT": 0x25,
+    "UP": 0x26,
+    "RIGHT": 0x27,
+    "DOWN": 0x28,
+    "INSERT": 0x2D,
+    "DELETE": 0x2E,
+    "DEL": 0x2E,
+    "WIN": 0x5B,
+    "WINDOWS": 0x5B,
+    "NUMLOCK": 0x90,
+    "SCROLLLOCK": 0x91,
+}
+for index in range(1, 13):
+    VK_KEY_NAMES[f"F{index}"] = 0x6F + index
 
 GYRO_SCALE_DEG_PER_SEC = 936.0 / 32767.0
 LARGE_CURSOR_SIZE = 64
 SPI_SETCURSORS = 0x0057
 CALIBRATION_SAMPLE_COUNT = 60
+STARTUP_REGISTRY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
 class MOUSEINPUT(ctypes.Structure):
@@ -45,8 +102,21 @@ class MOUSEINPUT(ctypes.Structure):
     ]
 
 
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.c_ushort),
+        ("wScan", ctypes.c_ushort),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
+
+
 class INPUT_UNION(ctypes.Union):
-    _fields_ = [("mi", MOUSEINPUT)]
+    _fields_ = [
+        ("mi", MOUSEINPUT),
+        ("ki", KEYBDINPUT),
+    ]
 
 
 class INPUT(ctypes.Structure):
@@ -57,6 +127,8 @@ class INPUT(ctypes.Structure):
 
 
 user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
+ERROR_ALREADY_EXISTS = 183
 
 
 def send_mouse(flags, dx=0, dy=0, data=0):
@@ -64,6 +136,70 @@ def send_mouse(flags, dx=0, dy=0, data=0):
     mouse_input = MOUSEINPUT(dx, dy, data, flags, 0, ctypes.pointer(extra))
     input_data = INPUT(INPUT_MOUSE, INPUT_UNION(mi=mouse_input))
     user32.SendInput(1, ctypes.byref(input_data), ctypes.sizeof(input_data))
+
+
+def send_key_down(vk):
+    extra = ctypes.c_ulong(0)
+    input_data = INPUT(INPUT_KEYBOARD, INPUT_UNION(ki=KEYBDINPUT(vk, 0, 0, 0, ctypes.pointer(extra))))
+    user32.SendInput(1, ctypes.byref(input_data), ctypes.sizeof(INPUT))
+
+
+def send_key_up(vk):
+    extra = ctypes.c_ulong(0)
+    input_data = INPUT(INPUT_KEYBOARD, INPUT_UNION(ki=KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP, 0, ctypes.pointer(extra))))
+    user32.SendInput(1, ctypes.byref(input_data), ctypes.sizeof(INPUT))
+
+
+def send_key(vk):
+    send_key_down(vk)
+    send_key_up(vk)
+
+
+def parse_key_macro(text):
+    parts = [part.strip() for part in text.replace("+", " ").split() if part.strip()]
+    keys = []
+    for part in parts:
+        vk = key_name_to_vk(part)
+        if vk is None:
+            return None
+        keys.append(vk)
+    return keys
+
+
+def key_name_to_vk(name):
+    normalized = name.strip().upper()
+    if len(normalized) == 1 and "A" <= normalized <= "Z":
+        return ord(normalized)
+    if len(normalized) == 1 and "0" <= normalized <= "9":
+        return ord(normalized)
+    return VK_KEY_NAMES.get(normalized)
+
+
+def send_key_macro(text):
+    keys = parse_key_macro(text)
+    if not keys:
+        return False
+
+    for vk in keys:
+        send_key_down(vk)
+    for vk in reversed(keys):
+        send_key_up(vk)
+    return True
+
+
+def create_single_instance_mutex():
+    handle = kernel32.CreateMutexW(None, False, SINGLE_INSTANCE_MUTEX)
+    already_running = kernel32.GetLastError() == ERROR_ALREADY_EXISTS
+    return handle, already_running
+
+
+def notify_existing_instance():
+    try:
+        with socket.create_connection((CONTROL_HOST, CONTROL_PORT), timeout=0.5) as sock:
+            sock.sendall(b"show\n")
+        return True
+    except OSError:
+        return False
 
 
 def center_mouse():
@@ -98,6 +234,40 @@ def delete_cursor_size_value():
     except OSError:
         pass
     load_system_cursors()
+
+
+def startup_command():
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" --startup'
+
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    launcher = pythonw if pythonw.exists() else Path(sys.executable)
+    return f'"{launcher}" "{Path(__file__).resolve()}" --startup'
+
+
+def enable_startup():
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_REGISTRY_PATH, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, startup_command())
+    except OSError:
+        pass
+
+
+def load_settings():
+    try:
+        with SETTINGS_PATH.open("r", encoding="utf-8") as file:
+            return json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_settings(settings):
+    try:
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with SETTINGS_PATH.open("w", encoding="utf-8") as file:
+            json.dump(settings, file, indent=2)
+    except OSError:
+        pass
 
 
 def clamp(value, low, high):
@@ -283,6 +453,12 @@ class App:
         self.running = False
         self.left_pressed = False
         self.right_pressed = False
+        self.middle_pressed = False
+        self.button_debounce = {}
+        self.tray_icon = None
+        self.tray_available = False
+        self.control_server = None
+        self.quitting = False
         self.cursor_original_size = None
         self.cursor_size_changed = False
         self.last_buttons = (0, 0, 0)
@@ -292,19 +468,25 @@ class App:
         self.mouse_remainder_y = 0.0
         self.drift_yaw = 0.0
         self.drift_roll = 0.0
+        self.motion_energy = 0.0
+        self.filtered_yaw = 0.0
+        self.filtered_roll = 0.0
         self.calibration_samples = []
         self.calibrating = False
+        self.settings = load_settings()
+        self.loading_settings = True
 
-        self.sensitivity = tk.DoubleVar(value=0.5)
-        self.deadzone = tk.DoubleVar(value=0.5)
-        self.scroll_speed = tk.DoubleVar(value=4.0)
-        self.invert_y = tk.BooleanVar(value=True)
-        self.invert_roll = tk.BooleanVar(value=False)
-        self.convert_direction = tk.BooleanVar(value=False)
-        self.left_stick_scroll = tk.BooleanVar(value=True)
-        self.dpad_nudge = tk.BooleanVar(value=True)
-        self.a_action = tk.StringVar(value="None")
-        self.b_action = tk.StringVar(value="None")
+        self.sensitivity = tk.DoubleVar(value=self.setting("sensitivity", 0.5))
+        self.deadzone = tk.DoubleVar(value=self.setting("deadzone", 0.5))
+        self.smart_stabilization = tk.BooleanVar(value=self.setting("smart_stabilization", True))
+        self.scroll_speed = tk.DoubleVar(value=self.setting("scroll_speed", 1.0))
+        self.invert_y = tk.BooleanVar(value=self.setting("invert_y", True))
+        self.invert_roll = tk.BooleanVar(value=self.setting("invert_roll", False))
+        self.convert_direction = tk.BooleanVar(value=self.setting("convert_direction", False))
+        self.left_stick_scroll = tk.BooleanVar(value=self.setting("left_stick_scroll", True))
+        self.dpad_nudge = tk.BooleanVar(value=self.setting("dpad_nudge", True))
+        self.a_action = tk.StringVar(value=self.setting("a_action", "None"))
+        self.b_action = tk.StringVar(value=self.setting("b_action", "Win+H"))
 
         self.status_text = tk.StringVar(value="Stopped")
         self.controller_text = tk.StringVar(value="No Joy-Con / Switch controller connected yet")
@@ -316,8 +498,41 @@ class App:
         self.loading_text = tk.StringVar(value="")
 
         self.build_ui()
+        self.bind_settings()
+        self.loading_settings = False
+        self.start_control_server()
+        enable_startup()
+        self.setup_tray()
+        if self.tray_available and "--startup" in sys.argv:
+            self.root.withdraw()
         self.root.after(200, self.connect)
+        self.root.after(500, self.auto_connect_loop)
         self.root.after(50, self.poll)
+
+    def setting(self, name, default):
+        return self.settings.get(name, default)
+
+    def bind_settings(self):
+        for name, variable in (
+            ("sensitivity", self.sensitivity),
+            ("deadzone", self.deadzone),
+            ("smart_stabilization", self.smart_stabilization),
+            ("scroll_speed", self.scroll_speed),
+            ("invert_y", self.invert_y),
+            ("invert_roll", self.invert_roll),
+            ("convert_direction", self.convert_direction),
+            ("left_stick_scroll", self.left_stick_scroll),
+            ("dpad_nudge", self.dpad_nudge),
+            ("a_action", self.a_action),
+            ("b_action", self.b_action),
+        ):
+            variable.trace_add("write", lambda *_args, key=name, var=variable: self.save_setting(key, var))
+
+    def save_setting(self, name, variable):
+        if self.loading_settings:
+            return
+        self.settings[name] = variable.get()
+        save_settings(self.settings)
 
     def build_ui(self):
         outer = ttk.Frame(self.root, padding=16)
@@ -335,8 +550,9 @@ class App:
 
         self.add_slider(controls, "Gyro sensitivity", self.sensitivity, 0.02, 1.5)
         self.add_slider(controls, "Drift filter", self.deadzone, 0.0, 5.0)
-        self.add_slider(controls, "Scroll speed", self.scroll_speed, 1.0, 12.0)
+        self.add_slider(controls, "Scroll speed", self.scroll_speed, 0.5, 12.0)
 
+        ttk.Checkbutton(controls, text="Smart stabilization", variable=self.smart_stabilization).pack(anchor="w", pady=3)
         ttk.Checkbutton(controls, text="Invert vertical movement", variable=self.invert_y).pack(anchor="w", pady=3)
         ttk.Checkbutton(controls, text="Invert roll / vertical gyro", variable=self.invert_roll).pack(anchor="w", pady=3)
         ttk.Checkbutton(controls, text="Convert direction", variable=self.convert_direction).pack(anchor="w", pady=3)
@@ -406,8 +622,21 @@ class App:
 
     @staticmethod
     def add_action_combo(parent, variable):
-        actions = ("None", "Left Click", "Right Click", "Reset Mouse", "Pause Gyro")
-        ttk.Combobox(parent, textvariable=variable, values=actions, width=12, state="readonly").pack(side="left", padx=(6, 0))
+        actions = (
+            "None",
+            "Left Click",
+            "Right Click",
+            "Reset Mouse",
+            "Pause Gyro",
+            "Space",
+            "Enter",
+            "Esc",
+            "Ctrl+C",
+            "Ctrl+V",
+            "Alt+Tab",
+            "Win+H",
+        )
+        ttk.Combobox(parent, textvariable=variable, values=actions, width=14).pack(side="left", padx=(6, 0))
 
     def connect(self):
         if hid is None:
@@ -419,6 +648,38 @@ class App:
             self.begin_drift_calibration()
         else:
             self.controller_text.set("No Joy-Con / Switch controller found. Pair it in Switch mode, then press Connect.")
+
+    def auto_connect_loop(self):
+        if not self.quitting and not self.joycon.device:
+            self.connect()
+        self.root.after(3000, self.auto_connect_loop)
+
+    def start_control_server(self):
+        try:
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind((CONTROL_HOST, CONTROL_PORT))
+            server.listen(1)
+            self.control_server = server
+        except OSError:
+            return
+
+        thread = threading.Thread(target=self.control_server_loop, daemon=True)
+        thread.start()
+
+    def control_server_loop(self):
+        while not self.quitting and self.control_server:
+            try:
+                client, _ = self.control_server.accept()
+            except OSError:
+                break
+            with client:
+                try:
+                    command = client.recv(64).decode("utf-8", errors="ignore").strip()
+                except OSError:
+                    command = ""
+            if command == "show":
+                self.root.after(0, self.show_window)
 
     def start(self):
         if not self.joycon.device:
@@ -466,8 +727,10 @@ class App:
 
     def reset_mouse(self):
         center_mouse()
-        self.begin_drift_calibration()
-        self.status_text.set("Mouse centered. Hold still to calibrate drift.")
+        self.reset_air_mouse_state()
+        self.loading_text.set("")
+        self.reset_button.configure(text="Reset Mouse")
+        self.status_text.set("Mouse centered.")
 
     def poll(self):
         if not self.joycon.device:
@@ -491,14 +754,15 @@ class App:
         shared_buttons = report["shared_buttons"]
         left_buttons = report["left_buttons"]
         buttons = (right_buttons, shared_buttons, left_buttons)
+        debounced = self.build_debounced_buttons(right_buttons, shared_buttons, left_buttons)
         gyro_x, gyro_y, gyro_z = report["gyro_dps"]
         left_x, left_y = report["left_stick"]
         right_x, right_y = report["right_stick"]
         stick_x, stick_y = self.active_stick(left_x, left_y, right_x, right_y)
         yaw, roll = self.map_gyro(gyro_x, gyro_y, gyro_z)
 
-        self.handle_start_toggle(right_buttons, shared_buttons)
-        self.handle_mouse_reset(right_buttons, left_buttons)
+        self.handle_start_toggle(debounced)
+        self.handle_mouse_reset(debounced)
         self.update_drift_calibration(yaw, roll)
 
         corrected_yaw = yaw - self.drift_yaw
@@ -513,8 +777,8 @@ class App:
         self.stick_text.set(f"LX {left_x:+.3f}  LY {left_y:+.3f}    RX {right_x:+.3f}  RY {right_y:+.3f}")
         self.button_text.set(self.describe_buttons(right_buttons, shared_buttons, left_buttons))
 
-        gyro_pause = self.is_gyro_pause_pressed(right_buttons)
-        self.handle_custom_button_actions(right_buttons)
+        gyro_pause = self.is_gyro_pause_pressed(debounced)
+        self.handle_custom_button_actions(debounced)
 
         if self.running and not self.calibrating:
             if gyro_pause:
@@ -523,9 +787,10 @@ class App:
             else:
                 self.move_mouse_from_gyro(yaw, roll)
                 self.runtime_text.set("Runtime: moving enabled")
-            self.update_mouse_buttons(right_buttons, left_buttons)
+            self.update_mouse_buttons(debounced)
             if self.left_stick_scroll.get():
-                self.scroll_from_stick(stick_x, stick_y)
+                self.scroll_and_arrows_from_stick(stick_x, stick_y)
+            self.update_middle_button(debounced)
             if self.dpad_nudge.get():
                 self.move_from_dpad(left_buttons)
         else:
@@ -575,25 +840,90 @@ class App:
             send_mouse(MOUSEEVENTF_MOVE, dx, dy)
 
     def apply_residual_filter(self, yaw, roll):
-        threshold = self.deadzone.get()
-        if threshold > 0:
-            if abs(yaw) < threshold:
-                yaw = 0.0
-            if abs(roll) < threshold:
-                roll = 0.0
-        return yaw, roll
+        if not self.smart_stabilization.get():
+            threshold = self.deadzone.get()
+            if threshold > 0:
+                if abs(yaw) < threshold:
+                    yaw = 0.0
+                if abs(roll) < threshold:
+                    roll = 0.0
+            return yaw, roll
 
-    def update_mouse_buttons(self, right_buttons, left_buttons):
+        magnitude = math.hypot(yaw, roll)
+        self.motion_energy = self.motion_energy * 0.82 + magnitude * 0.18
+
+        quiet_threshold = max(0.15, self.deadzone.get())
+        moving_threshold = quiet_threshold * 3.0
+        if self.motion_energy < moving_threshold and magnitude < quiet_threshold * 1.8:
+            self.filtered_yaw *= 0.72
+            self.filtered_roll *= 0.72
+            if abs(self.filtered_yaw) < 0.03:
+                self.filtered_yaw = 0.0
+            if abs(self.filtered_roll) < 0.03:
+                self.filtered_roll = 0.0
+            return self.filtered_yaw, self.filtered_roll
+
+        response = 0.78 if self.motion_energy > moving_threshold else 0.45
+        self.filtered_yaw = self.filtered_yaw * (1.0 - response) + yaw * response
+        self.filtered_roll = self.filtered_roll * (1.0 - response) + roll * response
+        return self.filtered_yaw, self.filtered_roll
+
+    def build_debounced_buttons(self, right_buttons, shared_buttons, left_buttons):
+        raw = {
+            "Y": bool(right_buttons & 0x01),
+            "X": bool(right_buttons & 0x02),
+            "B": bool(right_buttons & 0x04),
+            "A": bool(right_buttons & 0x08),
+            "R": bool(right_buttons & 0x40),
+            "ZR": bool(right_buttons & 0x80),
+            "-": bool(shared_buttons & 0x01),
+            "+": bool(shared_buttons & 0x02),
+            "RStick": bool(shared_buttons & 0x04),
+            "LStick": bool(shared_buttons & 0x08),
+            "Down": bool(left_buttons & 0x01),
+            "Up": bool(left_buttons & 0x02),
+            "Right": bool(left_buttons & 0x04),
+            "Left": bool(left_buttons & 0x08),
+            "L": bool(left_buttons & 0x40),
+            "ZL": bool(left_buttons & 0x80),
+        }
+        return {name: self.debounce_button(name, pressed) for name, pressed in raw.items()}
+
+    def debounce_button(self, name, pressed):
+        now = time.perf_counter()
+        state = self.button_debounce.get(name)
+        if state is None:
+            state = {
+                "raw": pressed,
+                "stable": pressed,
+                "changed_at": now,
+            }
+            self.button_debounce[name] = state
+            return pressed, False
+
+        if pressed != state["raw"]:
+            state["raw"] = pressed
+            state["changed_at"] = now
+
+        edge = False
+        debounce_time = 0.028
+        if state["stable"] != state["raw"] and now - state["changed_at"] >= debounce_time:
+            state["stable"] = state["raw"]
+            edge = state["stable"]
+
+        return state["stable"], edge
+
+    def update_mouse_buttons(self, buttons):
         if self.joycon.side == "left":
-            want_left = bool(left_buttons & 0x80)   # ZL, large trigger
-            want_right = bool(left_buttons & 0x40)  # L, small shoulder
+            want_left = buttons["ZL"][0]
+            want_right = buttons["L"][0]
         else:
-            want_left = bool(right_buttons & 0x80)   # ZR, large trigger
-            want_right = bool(right_buttons & 0x40)  # R, small shoulder
+            want_left = buttons["ZR"][0]
+            want_right = buttons["R"][0]
 
         if self.joycon.side != "left":
-            want_left = want_left or self.custom_button_held(right_buttons, "Left Click")
-            want_right = want_right or self.custom_button_held(right_buttons, "Right Click")
+            want_left = want_left or self.custom_button_held(buttons, "Left Click")
+            want_right = want_right or self.custom_button_held(buttons, "Right Click")
 
         if want_left != self.left_pressed:
             send_mouse(MOUSEEVENTF_LEFTDOWN if want_left else MOUSEEVENTF_LEFTUP)
@@ -610,17 +940,26 @@ class App:
         if self.right_pressed:
             send_mouse(MOUSEEVENTF_RIGHTUP)
             self.right_pressed = False
+        if self.middle_pressed:
+            send_mouse(MOUSEEVENTF_MIDDLEUP)
+            self.middle_pressed = False
 
-    def scroll_from_stick(self, stick_x, stick_y):
+    def scroll_and_arrows_from_stick(self, stick_x, stick_y):
         now = time.perf_counter()
-        interval = max(0.015, 0.09 / self.scroll_speed.get())
+        interval = max(0.04, 0.18 / self.scroll_speed.get())
         if abs(stick_y) >= 0.35 and now - self.last_scroll_time >= interval:
             send_mouse(MOUSEEVENTF_WHEEL, data=int(math.copysign(WHEEL_DELTA, stick_y)))
             self.last_scroll_time = now
 
         if abs(stick_x) >= 0.35 and now - self.last_hscroll_time >= interval:
-            send_mouse(MOUSEEVENTF_HWHEEL, data=int(math.copysign(WHEEL_DELTA, stick_x)))
+            send_key(VK_RIGHT if stick_x > 0 else VK_LEFT)
             self.last_hscroll_time = now
+
+    def update_middle_button(self, buttons):
+        want_middle = buttons["RStick"][0] or buttons["LStick"][0]
+        if want_middle != self.middle_pressed:
+            send_mouse(MOUSEEVENTF_MIDDLEDOWN if want_middle else MOUSEEVENTF_MIDDLEUP)
+            self.middle_pressed = want_middle
 
     def move_from_dpad(self, left_buttons):
         dx = 0
@@ -636,52 +975,60 @@ class App:
         if dx or dy:
             send_mouse(MOUSEEVENTF_MOVE, dx, dy)
 
-    def handle_start_toggle(self, right_buttons, shared_buttons):
-        plus_pressed = bool(shared_buttons & 0x02)
-        plus_was_pressed = bool(self.last_buttons[1] & 0x02)
-
-        if plus_pressed and not plus_was_pressed:
+    def handle_start_toggle(self, buttons):
+        if buttons["+"][1]:
             if self.running:
                 self.stop()
             else:
                 self.start()
 
-    def is_gyro_pause_pressed(self, right_buttons):
+    def is_gyro_pause_pressed(self, buttons):
         if self.joycon.side == "left":
             return False
-        return bool(right_buttons & 0x01) or self.custom_button_held(right_buttons, "Pause Gyro")  # Y
+        return buttons["Y"][0] or self.custom_button_held(buttons, "Pause Gyro")
 
-    def handle_mouse_reset(self, right_buttons, left_buttons):
+    def handle_mouse_reset(self, buttons):
         if self.joycon.side == "left":
-            reset_pressed = bool(left_buttons & 0x02)  # Up
-            reset_was_pressed = bool(self.last_buttons[2] & 0x02)
+            reset_edge = buttons["Up"][1]
         else:
-            reset_pressed = bool(right_buttons & 0x02)  # X
-            reset_was_pressed = bool(self.last_buttons[0] & 0x02)
+            reset_edge = buttons["X"][1]
 
-        if reset_pressed and not reset_was_pressed:
+        if reset_edge:
             self.reset_mouse()
 
-    def handle_custom_button_actions(self, right_buttons):
+    def handle_custom_button_actions(self, buttons):
         if self.joycon.side == "left":
             return
 
-        for bit, variable in ((0x08, self.a_action), (0x04, self.b_action)):
-            pressed = bool(right_buttons & bit)
-            was_pressed = bool(self.last_buttons[0] & bit)
-            if pressed and not was_pressed and variable.get() == "Reset Mouse":
-                self.reset_mouse()
+        for name, variable in (("A", self.a_action), ("B", self.b_action)):
+            if buttons[name][1]:
+                self.run_custom_button_action(variable.get())
 
-    def custom_button_held(self, right_buttons, action):
-        if self.a_action.get() == action and right_buttons & 0x08:
+    def custom_button_held(self, buttons, action):
+        if self.a_action.get() == action and buttons["A"][0]:
             return True
-        if self.b_action.get() == action and right_buttons & 0x04:
+        if self.b_action.get() == action and buttons["B"][0]:
             return True
         return False
+
+    def run_custom_button_action(self, action):
+        action = action.strip()
+        if not action or action == "None":
+            return
+        if action == "Reset Mouse":
+            self.reset_mouse()
+            return
+        if action in ("Left Click", "Right Click", "Pause Gyro"):
+            return
+        if not send_key_macro(action):
+            self.runtime_text.set(f"Runtime: unknown macro '{action}'")
 
     def reset_air_mouse_state(self):
         self.mouse_remainder_x = 0.0
         self.mouse_remainder_y = 0.0
+        self.motion_energy = 0.0
+        self.filtered_yaw = 0.0
+        self.filtered_roll = 0.0
 
     def begin_drift_calibration(self):
         self.reset_air_mouse_state()
@@ -716,7 +1063,7 @@ class App:
         filled = int(progress * 12)
         bar = "#" * filled + "-" * (12 - filled)
         dots = "." * ((len(self.calibration_samples) // 6) % 4)
-        self.loading_text.set(f"Reset/calibrating [{bar}] {int(progress * 100):3d}%{dots}")
+        self.loading_text.set(f"Calibrating drift [{bar}] {int(progress * 100):3d}%{dots}")
         self.reset_button.configure(text="Calibrating...")
 
     @staticmethod
@@ -752,11 +1099,71 @@ class App:
         self.root.mainloop()
 
     def on_close(self):
+        if not self.quitting and self.tray_available:
+            self.root.withdraw()
+            return
+
+        self.quit_app()
+
+    def quit_app(self):
+        self.quitting = True
         self.stop()
         self.restore_cursor_size()
         self.joycon.close()
+        if self.tray_icon:
+            self.tray_icon.stop()
+        if self.control_server:
+            try:
+                self.control_server.close()
+            except OSError:
+                pass
         self.root.destroy()
+
+    def show_window(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def setup_tray(self):
+        if pystray is None or Image is None or ImageDraw is None:
+            self.tray_available = False
+            return
+
+        image = self.create_tray_image()
+        menu = pystray.Menu(
+            pystray.MenuItem("Open", lambda icon, item: self.root.after(0, self.show_window), default=True),
+            pystray.MenuItem("Start", lambda icon, item: self.root.after(0, self.start)),
+            pystray.MenuItem("Stop", lambda icon, item: self.root.after(0, self.stop)),
+            pystray.MenuItem("Reset Mouse", lambda icon, item: self.root.after(0, self.reset_mouse)),
+            pystray.MenuItem("Quit", lambda icon, item: self.root.after(0, self.quit_app)),
+        )
+        self.tray_icon = pystray.Icon(APP_NAME, image, APP_NAME, menu)
+
+        try:
+            self.tray_icon.run_detached()
+            self.tray_available = True
+        except Exception:
+            self.tray_available = False
+
+    @staticmethod
+    def create_tray_image():
+        image = Image.new("RGBA", (64, 64), (16, 20, 24, 255))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((10, 8, 54, 56), radius=13, outline=(45, 212, 191), width=4, fill=(15, 41, 48))
+        draw.ellipse((25, 17, 39, 31), outline=(229, 231, 235), width=3)
+        draw.ellipse((23, 38, 31, 46), fill=(143, 211, 255))
+        draw.ellipse((34, 38, 42, 46), fill=(143, 211, 255))
+        return image
 
 
 if __name__ == "__main__":
-    App().run()
+    mutex_handle, already_running = create_single_instance_mutex()
+    if already_running:
+        notify_existing_instance()
+        sys.exit(0)
+
+    try:
+        App().run()
+    finally:
+        if mutex_handle:
+            kernel32.CloseHandle(mutex_handle)
