@@ -383,21 +383,20 @@ class JoyCon:
         if not self.device:
             return None
 
-        latest_report = None
         try:
             for _ in range(8):
                 data = self.device.read(64)
                 if not data:
                     break
                 if data[0] == 0x30 and len(data) >= 49:
-                    latest_report = self.parse_report(data)
+                    report = self.parse_report(data)
+                    self.last_report = report
+                    return report
         except OSError:
             self.close()
             return None
 
-        if latest_report:
-            self.last_report = latest_report
-        return latest_report
+        return self.last_report
 
     def parse_report(self, data):
         buttons_right = data[3]
@@ -472,8 +471,6 @@ class App:
         self.bias_samples = []
         self.stationary_score = 0.0
         self.last_accel_raw = None
-        self.last_bias_yaw = None
-        self.last_bias_roll = None
         self.motion_energy = 0.0
         self.filtered_yaw = 0.0
         self.filtered_roll = 0.0
@@ -892,18 +889,12 @@ class App:
         corrected_yaw = yaw - self.drift_yaw
         corrected_roll = roll - self.drift_roll
         corrected_magnitude = math.hypot(corrected_yaw, corrected_roll)
-        raw_magnitude = math.hypot(yaw, roll)
-        gyro_delta = 0.0
-        if self.last_bias_yaw is not None and self.last_bias_roll is not None:
-            gyro_delta = math.hypot(yaw - self.last_bias_yaw, roll - self.last_bias_roll)
-        self.last_bias_yaw = yaw
-        self.last_bias_roll = roll
 
         if self.bias_ready:
             gyro_limit = max(0.65, self.deadzone.get() * 1.25)
-            stationary = corrected_magnitude < gyro_limit and gyro_delta < 0.22 and accel_delta < 350.0
+            stationary = corrected_magnitude < gyro_limit and accel_delta < 350.0
         else:
-            stationary = raw_magnitude < 10.0 and gyro_delta < 0.22 and accel_delta < 350.0
+            stationary = math.hypot(yaw, roll) < 1.8 and accel_delta < 350.0
 
         if stationary:
             self.stationary_score = min(1.0, self.stationary_score + 0.08)
@@ -918,7 +909,7 @@ class App:
         if not self.bias_ready:
             self.bias_samples.append((yaw, roll))
             if len(self.bias_samples) < 45:
-                self.runtime_text.set("Runtime: learning gyro zero")
+                self.runtime_text.set("Runtime: stabilizing mouse - do not shake / 不要抖动")
                 return
 
             self.drift_yaw = self.median(sample[0] for sample in self.bias_samples)
@@ -926,7 +917,7 @@ class App:
             self.bias_samples.clear()
             self.bias_ready = True
             self.reset_air_mouse_state()
-            self.runtime_text.set("Runtime: gyro zero learned")
+            self.runtime_text.set("Runtime: mouse stabilized")
             return
 
         correction_rate = 0.01
@@ -1096,8 +1087,6 @@ class App:
         self.filtered_roll = 0.0
         self.stationary_score = 0.0
         self.last_accel_raw = None
-        self.last_bias_yaw = None
-        self.last_bias_roll = None
 
     def reset_bias_estimator(self):
         self.drift_yaw = 0.0
@@ -1106,8 +1095,6 @@ class App:
         self.bias_samples.clear()
         self.stationary_score = 0.0
         self.last_accel_raw = None
-        self.last_bias_yaw = None
-        self.last_bias_roll = None
 
     @staticmethod
     def median(values):
