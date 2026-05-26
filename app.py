@@ -658,7 +658,7 @@ class App:
             self.calibrating = False
             self.calibration_required = True
             self.calibration_samples.clear()
-            self.loading_text.set("Calibration required - hold still and click Calibrate Gyro / 请先校准，不要抖动")
+            self.loading_text.set("Calibration required - hold still and click Calibrate Gyro")
             self.calibrate_button.configure(text="Calibrate Gyro", state="normal")
             self.start_button.configure(state="disabled")
             self.stop_button.configure(state="disabled")
@@ -705,8 +705,8 @@ class App:
             return
         if self.calibration_required:
             self.status_text.set("Calibrate gyro before Start.")
-            self.runtime_text.set("Runtime: calibration required - do not shake / 不要抖动")
-            self.loading_text.set("Click Calibrate Gyro while holding the Joy-Con still / 请先点击校准")
+            self.runtime_text.set("Runtime: calibration required - do not shake")
+            self.loading_text.set("Click Calibrate Gyro while holding the Joy-Con still")
             return
         self.running = True
         self.status_text.set("Running")
@@ -822,7 +822,7 @@ class App:
         else:
             self.release_mouse_buttons()
             if self.calibrating:
-                self.runtime_text.set("Runtime: calibrating - do not shake / 不要抖动")
+                self.runtime_text.set("Runtime: calibrating - do not shake")
             elif not self.running:
                 self.runtime_text.set("Runtime: stopped")
 
@@ -934,7 +934,7 @@ class App:
         if not self.bias_ready:
             self.bias_samples.append((yaw, roll))
             if len(self.bias_samples) < 45:
-                self.runtime_text.set("Runtime: stabilizing mouse - do not shake / 不要抖动")
+                self.runtime_text.set("Runtime: stabilizing mouse - do not shake")
                 return
 
             self.drift_yaw = self.median(sample[0] for sample in self.bias_samples)
@@ -1127,7 +1127,7 @@ class App:
         self.calibration_samples.clear()
         self.calibrating = True
         self.status_text.set("Calibrating gyro. Hold the Joy-Con still.")
-        self.runtime_text.set("Runtime: calibrating - do not shake / 不要抖动")
+        self.runtime_text.set("Runtime: calibrating - do not shake")
         self.calibrate_button.configure(text="Calibrating...", state="disabled")
         self.update_calibration_progress()
 
@@ -1158,7 +1158,7 @@ class App:
         filled = int(progress * 12)
         bar = "#" * filled + "-" * (12 - filled)
         percent = int(progress * 100)
-        self.loading_text.set(f"Calibrating [{bar}] {percent:3d}% - do not shake / 不要抖动")
+        self.loading_text.set(f"Calibrating [{bar}] {percent:3d}% - do not shake")
 
     def reset_bias_estimator(self):
         self.drift_yaw = 0.0
