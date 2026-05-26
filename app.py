@@ -87,6 +87,7 @@ for index in range(1, 13):
 GYRO_SCALE_DEG_PER_SEC = 936.0 / 32767.0
 LARGE_CURSOR_SIZE = 64
 SPI_SETCURSORS = 0x0057
+MANUAL_CALIBRATION_SAMPLE_COUNT = 60
 STARTUP_REGISTRY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
@@ -475,6 +476,7 @@ class App:
         self.filtered_yaw = 0.0
         self.filtered_roll = 0.0
         self.calibrating = False
+        self.calibration_samples = []
         self.settings = load_settings()
         self.loading_settings = True
 
@@ -580,6 +582,9 @@ class App:
         self.reset_button = ttk.Button(buttons, text="Reset Mouse", command=self.reset_mouse)
         self.reset_button.pack(side="left", expand=True, fill="x", padx=6)
 
+        self.calibrate_button = ttk.Button(buttons, text="Calibrate Gyro", command=self.begin_manual_calibration)
+        self.calibrate_button.pack(side="left", expand=True, fill="x", padx=6)
+
         self.stop_button = ttk.Button(buttons, text="Stop", command=self.stop, state="disabled")
         self.stop_button.pack(side="left", expand=True, fill="x", padx=(6, 0))
 
@@ -649,7 +654,10 @@ class App:
             self.controller_text.set(f"Connected: {self.joycon.name} ({self.joycon.side})")
             self.reset_bias_estimator()
             self.reset_air_mouse_state()
+            self.calibrating = False
+            self.calibration_samples.clear()
             self.loading_text.set("")
+            self.calibrate_button.configure(text="Calibrate Gyro", state="normal")
             self.status_text.set("Stopped")
         else:
             self.controller_text.set("No Joy-Con / Switch controller found. Pair it in Switch mode, then press Connect.")
@@ -769,7 +777,10 @@ class App:
 
         self.handle_start_toggle(debounced)
         self.handle_mouse_reset(debounced)
-        self.update_bias_estimator(yaw, roll, accel)
+        if self.calibrating:
+            self.update_manual_calibration(yaw, roll)
+        else:
+            self.update_bias_estimator(yaw, roll, accel)
 
         corrected_yaw = yaw - self.drift_yaw
         corrected_roll = roll - self.drift_roll
@@ -802,7 +813,7 @@ class App:
         else:
             self.release_mouse_buttons()
             if self.calibrating:
-                self.runtime_text.set("Runtime: calibrating, hold still")
+                self.runtime_text.set("Runtime: calibrating - do not shake / 不要抖动")
             elif not self.running:
                 self.runtime_text.set("Runtime: stopped")
 
@@ -1087,6 +1098,49 @@ class App:
         self.filtered_roll = 0.0
         self.stationary_score = 0.0
         self.last_accel_raw = None
+
+    def begin_manual_calibration(self):
+        if not self.joycon.device:
+            self.status_text.set("Connect a controller before calibrating.")
+            self.loading_text.set("")
+            return
+
+        self.release_mouse_buttons()
+        self.reset_bias_estimator()
+        self.reset_air_mouse_state()
+        self.calibration_samples.clear()
+        self.calibrating = True
+        self.status_text.set("Calibrating gyro. Hold the Joy-Con still.")
+        self.runtime_text.set("Runtime: calibrating - do not shake / 不要抖动")
+        self.calibrate_button.configure(text="Calibrating...", state="disabled")
+        self.update_calibration_progress()
+
+    def update_manual_calibration(self, yaw, roll):
+        if not self.calibrating:
+            return
+
+        self.calibration_samples.append((yaw, roll))
+        if len(self.calibration_samples) < MANUAL_CALIBRATION_SAMPLE_COUNT:
+            self.update_calibration_progress()
+            return
+
+        self.drift_yaw = self.median(sample[0] for sample in self.calibration_samples)
+        self.drift_roll = self.median(sample[1] for sample in self.calibration_samples)
+        self.bias_ready = True
+        self.calibrating = False
+        self.calibration_samples.clear()
+        self.reset_air_mouse_state()
+        self.loading_text.set("")
+        self.calibrate_button.configure(text="Calibrate Gyro", state="normal")
+        self.status_text.set("Gyro calibrated.")
+        self.runtime_text.set("Runtime: gyro calibrated")
+
+    def update_calibration_progress(self):
+        progress = min(1.0, len(self.calibration_samples) / MANUAL_CALIBRATION_SAMPLE_COUNT)
+        filled = int(progress * 12)
+        bar = "#" * filled + "-" * (12 - filled)
+        percent = int(progress * 100)
+        self.loading_text.set(f"Calibrating [{bar}] {percent:3d}% - do not shake / 不要抖动")
 
     def reset_bias_estimator(self):
         self.drift_yaw = 0.0
