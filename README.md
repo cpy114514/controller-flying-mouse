@@ -30,3 +30,7 @@ Windows air mouse app for one Joy-Con, Switch Pro Controller, or compatible Swit
 - `Reset Mouse` only centers the cursor. It does not calibrate gyro.
 - The app starts with Windows and hides to the system tray on startup.
 - Only one app instance can run at a time.
+
+## AI Usage
+
+-Used codex to did some coding
